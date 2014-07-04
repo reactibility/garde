@@ -134,12 +134,12 @@ class ModuleSupervisor(implicit val timeout: Timeout) extends Actor with PipeToS
   def waiting(client: ActorRef, cmd: CreateModule): Receive = {
 
     case s @ Success(actorRef) =>
-      context.actorOf(Props(new ActiveModule(cmd.id)), cmd.id) ! ModuleCreation(client, cmd)
+      client ! s"Module ${cmd.id} already exists.".failureNel
       context unbecome()
       unstashAll()
 
     case f @ Failure(e)        =>
-      client ! e.failureNel
+      context.actorOf(Props(new ActiveModule(cmd.id)), cmd.id) ! ModuleCreation(client, cmd)
       context unbecome()
       unstashAll()
 
