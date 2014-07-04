@@ -4,13 +4,15 @@
 
 package garde.security
 
-import akka.persistence.{SnapshotOffer, PersistentActor}
-import akka.actor.{OneForOneStrategy, Stash, ActorRef, Props, Actor}
+import akka.persistence.PersistentActor
+import akka.actor._
 import akka.actor.SupervisorStrategy._
 import akka.pattern.PipeToSupport
+import akka.util.Timeout
+import akka.actor.OneForOneStrategy
+import akka.persistence.SnapshotOffer
 import scalaz._
 import Scalaz._
-import akka.util.Timeout
 
 /**
  * This is the current state of any given module.
@@ -30,32 +32,38 @@ class ActiveModule(id: String)(implicit val timeout: Timeout) extends Persistent
   import ModuleSupervisor._
 
   var state: ModuleState = _
-  val persistenceId = id
+  override def persistenceId = id
 
   val receiveCommand: Receive = {
 
-    case msg @ ModuleCreation(client, cmd)                                   =>
-      val v = create(cmd.id, cmd.expectedVersion, cmd.name)
-      if (v.isSuccess)
-        persist(ModuleCreated(v.toOption.get.id, v.toOption.get.version, v.toOption.get.name)) { event =>
-          state = ModuleState(event.id, event.version, event.name)
-          context.system.eventStream.publish(event)
-        }
+    case msg @ ModuleCreation(client, cmd)                 =>
+      validateCreate(cmd) match {
+        case Success(v)     =>
+          persist(ModuleCreated(v.id, 0L, v.name)) { event =>
+            state = ModuleState(event.id, event.version, event.name)
+            context.system.eventStream.publish(event)
+            client ! event.success
+            sender ! event
+          }
+        case f @ Failure(v) =>
+          client ! f
+          throw CreationException(v.toString)
+      }
 
-      client ! v
-      throw CreationException(v.toEither.left.toString)
+    case cmd @ ChangeModuleName(id, expectedVersion, name) =>
+      validateChangeName(cmd) match {
+        case Success(v)     =>
+          persist(ModuleNameChanged(v.id, state.version + 1, v.name)) { event =>
+            state = state copy (version = event.version, name = event.name)
+            context.system.eventStream.publish(event)
+            sender ! event.success
+          }
+        case f @ Failure(v) => sender ! f
+      }
 
-    case cmd @ ChangeModuleName(id, expectedVersion, name) if id == state.id =>
-      val v = withName(expectedVersion, name)
-      if (v.isSuccess)
-        persist(ModuleNameChanged(v.toOption.get.id, v.toOption.get.version, v.toOption.get.name)) { event =>
-          state = ModuleState(event.id, event.version, event.name)
-          context.system.eventStream.publish(event)
-        }
+    case SaveSnapshot                                      => saveSnapshot(state)
 
-      sender ! v
-
-    case "snap"  => saveSnapshot(state)
+    case GetState                                          => sender ! state
   }
 
   val receiveRecover: Receive = {
@@ -64,17 +72,18 @@ class ActiveModule(id: String)(implicit val timeout: Timeout) extends Persistent
     case SnapshotOffer(_, snapshot: ModuleState) => state = snapshot
   }
 
-  def create(id: String, version: Long, name: String): DomainValidation[ModuleState] =
-    (checkString(id, IdRequired).toValidationNel |@|
+  def validateCreate(cmd: CreateModule): DomainValidation[CreateModule] =
+    (checkString(cmd.id, IdRequired).toValidationNel |@|
       0L.successNel |@|
-      checkString(name, NameRequired).toValidationNel) { (i, v, n) =>
-      ModuleState(i, v, n)
+      checkString(cmd.name, NameRequired).toValidationNel) { (i, v, n) =>
+      CreateModule(i, n)
     }
 
-  def withName(expectedVersion: Long, name: String): DomainValidation[ModuleState] =
-    (checkVersion(expectedVersion, state.version, IncorrectVersion).toValidationNel |@|
-      checkString(name, NameRequired).toValidationNel) { (v, n) =>
-      ModuleState(state.id, v, n)
+  def validateChangeName(cmd: ChangeModuleName): DomainValidation[ChangeModuleName] =
+    (checkId(cmd.id, state.id, IdMismatch).toValidationNel |@|
+      checkVersion(cmd.expectedVersion, state.version, IncorrectVersion).toValidationNel |@|
+      checkString(cmd.name, NameRequired).toValidationNel) { (i, v, n) =>
+      ChangeModuleName(state.id, v, n)
     }
 }
 
@@ -85,6 +94,7 @@ object ActiveModule {
 
   case object IncorrectVersion extends ValidationKey
   case object IdRequired extends ValidationKey
+  case object IdMismatch extends ValidationKey
   case object NameRequired extends ValidationKey
 
   sealed trait ModuleCommand {
@@ -92,12 +102,14 @@ object ActiveModule {
     def expectedVersion: Long
   }
 
-  final case class CreateModule(id: String, expectedVersion: Long = -1L, name: String) extends ModuleCommand
+  final case class CreateModule(id: String, name: String)
   final case class ChangeModuleName(id: String, expectedVersion: Long, name: String) extends ModuleCommand
 
   final case class ModuleCreated(id: String, version: Long, name: String)
   final case class ModuleNameChanged(id: String, version: Long, name: String)
 
+  case object SaveSnapshot
+  case object GetState
   case class CreationException(msg: String) extends Throwable
 }
 
@@ -106,23 +118,29 @@ object ActiveModule {
  */
 class ModuleSupervisor(implicit val timeout: Timeout) extends Actor with PipeToSupport with Stash {
 
+  import CommonValidations._
   import ActiveModule._
   import ModuleSupervisor._
   import context.dispatcher
 
   override val supervisorStrategy =
     OneForOneStrategy() {
-      case _: CreationException => Stop
+      case e @ CreationException(msg) =>
+        context unbecome()
+        unstashAll()
+        Stop
       case _: Exception         => Restart
     }
 
   def receive = {
-    case cmd @ CreateModule(id, expectedVersion, name) =>
-      context become waiting(sender, cmd)
-      context.actorSelection(s"../$id").resolveOne() pipeTo self
+    case cmd @ CreateModule(id, name) =>
+      val v = checkString(id, IdRequired)
+      if (v.isSuccess) {
+        context become waiting(sender, cmd)
+        context.actorSelection(s"/user/${self.path.name}/$id") ! Identify(id)
+      }
+      else sender ! v.toValidationNel
   }
-
-  import scala.util.{Success, Failure}
 
   /**
    * This is the wait state used in module creation when determining if a proposed new module
@@ -133,17 +151,17 @@ class ModuleSupervisor(implicit val timeout: Timeout) extends Actor with PipeToS
    */
   def waiting(client: ActorRef, cmd: CreateModule): Receive = {
 
-    case s @ Success(actorRef) =>
+    case ActorIdentity(cmd.id, Some(ref))       =>
       client ! s"Module ${cmd.id} already exists.".failureNel
-      context unbecome()
-      unstashAll()
 
-    case f @ Failure(e)        =>
+    case ActorIdentity(cmd.id, None)            =>
       context.actorOf(Props(new ActiveModule(cmd.id)), cmd.id) ! ModuleCreation(client, cmd)
+
+    case msg @ ModuleCreated(id, version, name) =>
       context unbecome()
       unstashAll()
 
-    case _                     => stash()
+    case _                                      => stash()
   }
 }
 

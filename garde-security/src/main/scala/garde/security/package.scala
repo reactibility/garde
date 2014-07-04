@@ -36,5 +36,16 @@ package object security {
      */
     def checkVersion(expected: Long, current: Long, err: ValidationKey): Validation[String, Long] =
       if (expected == current) expected.success else err.failure
+
+    /**
+     * Validates that the id of an aggregate matches the aggregate id..
+     *
+     * @param proposed String proposed id
+     * @param id String the id
+     * @param err ValidationKey
+     * @return Validation
+     */
+    def checkId(proposed: String, id: String, err: ValidationKey): Validation[String, String] =
+      if (proposed == id) proposed.success else err.failure
   }
 }
