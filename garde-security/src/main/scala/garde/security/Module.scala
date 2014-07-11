@@ -4,11 +4,11 @@
 
 package garde.security
 
-import akka.persistence.{Recover, PersistentActor, SnapshotOffer}
 import akka.actor._
-import akka.actor.SupervisorStrategy._
-import akka.util.Timeout
 import akka.actor.OneForOneStrategy
+import akka.actor.SupervisorStrategy._
+import akka.persistence.{Recover, PersistentActor, SnapshotOffer}
+import akka.util.Timeout
 import scalaz._
 import Scalaz._
 
@@ -149,14 +149,16 @@ class ModuleSupervisor(implicit val timeout: Timeout) extends PersistentActor {
           case Some(m) => sender ! s"Module ${cmd.id} already exists.".failureNel
           case None    =>
             val client = sender
-            state.modules :+ id
-            context actorOf Props(new ModuleCreationSaga(client, cmd, context.actorOf(Props(new ActiveModule(cmd.id)), cmd.id)))
+            context actorOf(Props(new ModuleCreationSaga(client, cmd, context.actorOf(Props(new ActiveModule(cmd.id)), cmd.id))),
+              s"module-creation-saga-$id")
         }
       }
       else sender ! v.toValidationNel
 
     case evt @ ModuleCreated(id, version, name) =>
-      persist(ModuleCreationReceived(id)) { event => }
+      persist(ModuleCreationReceived(id)) { event =>
+        state.modules :+ event.id
+      }
 
     case SaveModuleSupervisorSnapshot => saveSnapshot(state)
   }
@@ -207,11 +209,12 @@ class ModuleCreationSaga(client: ActorRef, cmd: ActiveModule.CreateModule, actor
 
   def awaitCreation: Receive = {
     case evt @ ModuleCreated(id, version, name) =>
-      client ! evt.success
       context.parent ! evt
+      client ! evt.success
       context stop self
 
     case ReceiveTimeout                         =>
+      client ! s"CreateModule timed out after ${timeout.duration.toSeconds} seconds for module:${cmd.id}".failureNel
       context stop self
   }
 }
