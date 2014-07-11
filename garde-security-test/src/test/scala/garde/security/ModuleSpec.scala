@@ -20,23 +20,10 @@ val Config = ConfigFactory.parseString(s"""
    akka.log-dead-letters = off
    akka.log-dead-letters-during-shutdown = off
    akka.persistence.journal.leveldb.native = off
-   queued-dispatcher {
-     type = Dispatcher
-     mailbox-type = "akka.dispatch.UnboundedDequeBasedMailbox"
-     executor = "fork-join-executor"
-     fork-join-executor {
-       # Min number of threads to cap factor-based parallelism number to
-       parallelism-min = 1
-       # Parallelism (threads) ... ceil(available processors * factor)
-       parallelism-factor = 0
-       # Max number of threads to cap factor-based parallelism number to
-       parallelism-max = 1
-     }
-     # Throughput defines the maximum number of messages to be
-     # processed per actor before the thread jumps to the next actor.
-     # Set to 1 for as fair as possible.
-     throughput = 100
-   }""")
+   akka.persistence.journal.leveldb.dir = "target/journal"
+   akka.persistence.journal.leveldb-shared.store.dir = "target/journal"
+   akka.persistence.journal.snapshotstore.local.dir = "target/snapshots"
+   """)
 }
 
 class ModuleSpec extends TestKit(ActorSystem("test", ModuleSpec.Config))
@@ -59,23 +46,23 @@ class ModuleSpec extends TestKit(ActorSystem("test", ModuleSpec.Config))
   val Id = "module-id"
   val Name = "Module Name"
 
-//  "Module creation" must {
-//
-//    "succeed" in {
-//      val probe = TestProbe()
-//      val sup = system.actorOf(Props(new ModuleSupervisor()).withDispatcher("queued-dispatcher"), "sup")
-//      probe watch sup
-//
-//      sup ! CreateModule(Id, Name)
-//      expectMsg(timeout.duration, Success(ModuleCreated(Id, 0L, Name)))
-//      val module = Await.result(system.actorSelection(s"/user/sup/$Id").resolveOne(), timeout.duration)
-//      module ! GetState
-//      expectMsg(timeout.duration, ModuleState(Id, 0L, Name))
-//
-//      sup ! PoisonPill
-//      probe expectTerminated(sup, timeout.duration)
-//    }
-//
+  "Module creation" must {
+
+    "succeed" in {
+      val probe = TestProbe()
+      val sup = system.actorOf(Props(new ModuleSupervisor()), "sup")
+      probe watch sup
+
+      sup ! CreateModule(Id, Name)
+      expectMsg(timeout.duration, Success(ModuleCreated(Id, 0L, Name)))
+      //val module = Await.result(system.actorSelection(s"/user/sup/$Id").resolveOne(), timeout.duration)
+      //module ! GetState
+      //expectMsg(timeout.duration, ModuleState(Id, 0L, Name))
+
+      sup ! PoisonPill
+      probe expectTerminated(sup, timeout.duration)
+    }
+
 //    "fail with empty id" in {
 //      val probe = TestProbe()
 //      val sup = system.actorOf(Props(new ModuleSupervisor()).withDispatcher("queued-dispatcher"), "sup")
@@ -165,10 +152,10 @@ class ModuleSpec extends TestKit(ActorSystem("test", ModuleSpec.Config))
 //      sup ! PoisonPill
 //      probe expectTerminated(sup, timeout.duration)
 //    }
-//  }
-//
-  "Module change name" must {
+  }
 
+//  "Module change name" must {
+//
 //    "succeed" in {
 //      val probe = TestProbe()
 //      val sup = system.actorOf(Props(new ModuleSupervisor()).withDispatcher("queued-dispatcher"), "sup")
@@ -243,8 +230,8 @@ class ModuleSpec extends TestKit(ActorSystem("test", ModuleSpec.Config))
 //      sup ! PoisonPill
 //      probe expectTerminated(sup, timeout.duration)
 //    }
-  }
-
+//  }
+//
 //  "Module recover" must {
 //
 //    "succeed" in {

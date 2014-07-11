@@ -41,7 +41,7 @@ class ActiveModule(id: String)(implicit val timeout: Timeout) extends Persistent
 
   val receiveCommand: Receive = {
 
-    case cmd @ CreateModule(id, name)                 =>
+    case cmd @ CreateModule(id, name)                       =>
       try {
         validateCreate(cmd) match {
           case Success(v)     =>
@@ -69,7 +69,7 @@ class ActiveModule(id: String)(implicit val timeout: Timeout) extends Persistent
         case f @ Failure(v) => sender ! f
       }
 
-    case SaveModuleSnapshot                                      => saveSnapshot(state)
+    case SaveModuleSnapshot                                => saveSnapshot(state)
 
     case GetState                                          => sender ! state
   }
@@ -137,27 +137,26 @@ class ModuleSupervisor(implicit val timeout: Timeout) extends PersistentActor {
       case e @ CreationException(msg) =>
         state.modules filterNot(_ == msg)
         Stop
+
       case _: Exception               => Restart
     }
 
   def receiveCommand = {
-    case cmd @ CreateModule(id, name) =>
+    case cmd @ CreateModule(id, name)           =>
       val v = checkString(id, IdRequired)
       if (v.isSuccess) {
         state.modules.find(_ == v.toOption.get) match {
           case Some(m) => sender ! s"Module ${cmd.id} already exists.".failureNel
           case None    =>
             val client = sender
-            persist(ModuleCreationReceived(id)) { event =>
-              state.modules :+ event.id
-              context actorOf Props(new ModuleCreationSaga(client, cmd))
-            }
+            state.modules :+ id
+            context actorOf Props(new ModuleCreationSaga(client, cmd, context.actorOf(Props(new ActiveModule(cmd.id)), cmd.id)))
         }
       }
       else sender ! v.toValidationNel
 
-    case msg @ Instantiate(cmd)       =>
-      sender ! Instantiated(context.actorOf(Props(new ActiveModule(cmd.id)), cmd.id))
+    case evt @ ModuleCreated(id, version, name) =>
+      persist(ModuleCreationReceived(id)) { event => }
 
     case SaveModuleSupervisorSnapshot => saveSnapshot(state)
   }
@@ -175,10 +174,7 @@ class ModuleSupervisor(implicit val timeout: Timeout) extends PersistentActor {
  * Companion object for ModuleSupervisor.
  */
 object ModuleSupervisor {
-  import ActiveModule._
-  final val PersistenceId = "persistence-id"
-  sealed case class Instantiate(cmd: CreateModule)
-  sealed case class Instantiated(module: ActorRef)
+  final val PersistenceId = "module-supervisor-persistence-id"
   sealed case class CreationException(moduleId: String) extends Throwable
   final case class ModuleCreationReceived(id: String)
   case object SaveModuleSupervisorSnapshot
@@ -189,10 +185,10 @@ object ModuleSupervisor {
  * module supervisor and successful module creation.
  * @param client ActorRef original command sender
  * @param cmd CreateModule the module creation command
+ * @param actorRef ActorRef the persistence module actor ref
  */
-class ModuleCreationSaga(client: ActorRef, cmd: ActiveModule.CreateModule)(implicit val timeout: Timeout) extends Actor {
+class ModuleCreationSaga(client: ActorRef, cmd: ActiveModule.CreateModule, actorRef: ActorRef)(implicit val timeout: Timeout) extends Actor {
 
-  import ModuleSupervisor._
   import ActiveModule._
 
   private case object Start
@@ -205,35 +201,16 @@ class ModuleCreationSaga(client: ActorRef, cmd: ActiveModule.CreateModule)(impli
 
   def receive = {
     case Start =>
-      context become awaitUniqueness
-      context.actorSelection(s"../$id") ! Identify(id)
-  }
-
-  def awaitUniqueness: Receive = {
-    case ActorIdentity(cmd.id, Some(ref))       =>
-      client ! s"Module ${cmd.id} already exists.".failureNel
-      context stop self
-    case ActorIdentity(cmd.id, None)            =>
-      context become awaitInstantiation
-      context.parent ! Instantiate(cmd)
-    case ReceiveTimeout                         =>
-      context.parent ! CreationException(cmd.id)
-      context stop self
-  }
-
-  def awaitInstantiation: Receive = {
-    case msg @ Instantiated(module) =>
-      module ! cmd
       context become awaitCreation
-    case ReceiveTimeout                         =>
-      context.parent ! CreationException(cmd.id)
-      context stop self
+      actorRef ! cmd
   }
 
   def awaitCreation: Receive = {
     case evt @ ModuleCreated(id, version, name) =>
-      client ! evt
+      client ! evt.success
+      context.parent ! evt
       context stop self
+
     case ReceiveTimeout                         =>
       context stop self
   }
