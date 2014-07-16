@@ -9,6 +9,7 @@ import akka.actor.OneForOneStrategy
 import akka.actor.SupervisorStrategy._
 import akka.persistence.{Recover, PersistentActor, SnapshotOffer}
 import akka.util.Timeout
+import garde.security.ModuleSupervisor.CreationException
 import scalaz._
 import Scalaz._
 
@@ -25,7 +26,7 @@ sealed case class ModuleState(id: String, version: Long, name: String)
  * in order to instantiate the module persistent actors.
  * @param modules Seq[String] the collection of module ids.
  */
-sealed case class ModuleSupervisorState(modules: Seq[String])
+sealed case class ModuleSupervisorState(var modules: Seq[String])
 
 /**
  * Persistent actor representing an active module.
@@ -47,15 +48,17 @@ class ActiveModule(id: String)(implicit val timeout: Timeout) extends Persistent
           case Success(v)     =>
             persist(ModuleCreated(v.id, 0L, v.name)) { event =>
               state = ModuleState(event.id, event.version, event.name)
-              context.system.eventStream.publish(event)
               sender ! event
             }
           case f @ Failure(v) =>
-            throw CreationException(id)
+            sender ! CreationException(id, f)
+            context stop self
         }
       }
       catch {
-        case _: Exception => throw CreationException(id)
+        case e: Exception =>
+          //sender ! CreationException(id, e.getMessage.failureNel)
+          context stop self
       }
 
     case cmd @ ChangeModuleName(id, expectedVersion, name) =>
@@ -63,8 +66,7 @@ class ActiveModule(id: String)(implicit val timeout: Timeout) extends Persistent
         case Success(v)     =>
           persist(ModuleNameChanged(v.id, state.version + 1, v.name)) { event =>
             state = state copy (version = event.version, name = event.name)
-            context.system.eventStream.publish(event)
-            sender ! event.success
+            sender ! event.successNel
           }
         case f @ Failure(v) => sender ! f
       }
@@ -134,11 +136,7 @@ class ModuleSupervisor(implicit val timeout: Timeout) extends PersistentActor {
 
   override val supervisorStrategy =
     OneForOneStrategy() {
-      case e @ CreationException(msg) =>
-        state.modules filterNot(_ == msg)
-        Stop
-
-      case _: Exception               => Restart
+      case _: Exception => Restart
     }
 
   def receiveCommand = {
@@ -148,24 +146,31 @@ class ModuleSupervisor(implicit val timeout: Timeout) extends PersistentActor {
         state.modules.find(_ == v.toOption.get) match {
           case Some(m) => sender ! s"Module ${cmd.id} already exists.".failureNel
           case None    =>
-            val client = sender
-            context actorOf(Props(new ModuleCreationSaga(client, cmd, context.actorOf(Props(new ActiveModule(cmd.id)), cmd.id))),
-              s"module-creation-saga-$id")
+            try {
+              val client = sender
+              context actorOf(Props(new ModuleCreationSaga(client, cmd, context.actorOf(Props(new ActiveModule(cmd.id)), cmd.id))),
+                s"module-creation-saga-$id")
+            }
+            catch {
+              case e: Exception => sender ! e.getMessage.failureNel
+            }
         }
       }
       else sender ! v.toValidationNel
 
     case evt @ ModuleCreated(id, version, name) =>
       persist(ModuleCreationReceived(id)) { event =>
-        state.modules :+ event.id
+        state.modules  = state.modules :+ event.id
       }
 
-    case SaveModuleSupervisorSnapshot => saveSnapshot(state)
+    case SaveModuleSupervisorSnapshot           => saveSnapshot(state)
+
+    case GetSupervisorState                     => sender ! state
   }
 
   val receiveRecover: Receive = {
     case evt: ModuleCreationReceived                       =>
-      state.modules :+ evt.id
+      state.modules = state.modules :+ evt.id
       context.actorOf(Props(new ActiveModule(evt.id)), evt.id) ! Recover
 
     case SnapshotOffer(_, snapshot: ModuleSupervisorState) => state = snapshot
@@ -176,10 +181,13 @@ class ModuleSupervisor(implicit val timeout: Timeout) extends PersistentActor {
  * Companion object for ModuleSupervisor.
  */
 object ModuleSupervisor {
+  import ActiveModule._
+
   final val PersistenceId = "module-supervisor-persistence-id"
-  sealed case class CreationException(moduleId: String) extends Throwable
+  sealed case class CreationException(moduleId: String, validation: Failure[NonEmptyList[String], CreateModule])
   final case class ModuleCreationReceived(id: String)
   case object SaveModuleSupervisorSnapshot
+  case object GetSupervisorState
 }
 
 /**
@@ -210,7 +218,13 @@ class ModuleCreationSaga(client: ActorRef, cmd: ActiveModule.CreateModule, actor
   def awaitCreation: Receive = {
     case evt @ ModuleCreated(id, version, name) =>
       context.parent ! evt
+      context.system.eventStream.publish(evt)
       client ! evt.success
+      context stop self
+
+    case msg @ CreationException(id, ex) =>
+      context.system.eventStream.publish(msg)
+      client ! ex
       context stop self
 
     case ReceiveTimeout                         =>
