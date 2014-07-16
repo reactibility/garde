@@ -6,8 +6,6 @@ package garde.security
 
 import akka.actor._
 import akka.actor.OneForOneStrategy
-import akka.actor.SupervisorStrategy._
-import akka.pattern.PipeToSupport
 import akka.persistence.{RecoveryCompleted, Recover, PersistentActor, SnapshotOffer}
 import akka.util.Timeout
 import scalaz._
@@ -185,6 +183,12 @@ class ModuleCreationSaga(client: ActorRef, cmd: ActiveModule.CreateModule, actor
   }
 }
 
+/**
+ * This is a saga actor that manages the conditional locating, instantiating, and recovery of the module
+ * persistent actor.
+ * @param moduleId String the module id, matches the persistenceId
+ * @param timeout Timeout the timeout for any wait state
+ */
 class ModuleLocator(moduleId: String)(implicit val timeout: Timeout) extends Actor {
 
   import ModuleLocator._
@@ -242,6 +246,9 @@ class ModuleLocator(moduleId: String)(implicit val timeout: Timeout) extends Act
   }
 }
 
+/**
+ * Companion object for ModuleLocator.
+ */
 object ModuleLocator {
   case object LocateModule
 }

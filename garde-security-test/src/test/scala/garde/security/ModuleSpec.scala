@@ -4,20 +4,17 @@
 
 package garde.security
 
+import scala.concurrent.Await
+import scala.concurrent.duration._
+import scalaz._
 import java.io.File
-
 import akka.actor.{PoisonPill, ActorRef, ActorSystem, Props}
 import akka.pattern.AskSupport
-import akka.persistence.Recover
 import akka.testkit.{TestProbe, ImplicitSender, TestKit}
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import org.apache.commons.io.FileUtils
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, MustMatchers, WordSpecLike}
-
-import scala.concurrent.Await
-import scala.concurrent.duration._
-import scalaz._
 
 object ModuleSpec {
 
