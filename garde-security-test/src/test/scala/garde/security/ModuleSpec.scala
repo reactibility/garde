@@ -8,7 +8,7 @@ import scala.concurrent.Await
 import scala.concurrent.duration._
 import scalaz._
 import java.io.File
-import akka.actor.{PoisonPill, ActorRef, ActorSystem, Props}
+import akka.actor._
 import akka.pattern.AskSupport
 import akka.testkit.{TestProbe, ImplicitSender, TestKit}
 import akka.util.Timeout
@@ -148,8 +148,8 @@ class ModuleSpec extends TestKit(ActorSystem("test", ModuleSpec.Config))
       probe expectTerminated(m1, timeout.duration)
 
       val locator = system.actorOf(Props(new ModuleLocator("module-1")))
-      val located = Await.result(locator ? LocateModule, timeout.duration).asInstanceOf[ActorRef]
-      located.path.name must be(m1.path.name)
+      val located = Await.result(locator ? LocateModule, timeout.duration).asInstanceOf[ActorPath]
+      located.name must be(m1.path.name)
     }
   }
 

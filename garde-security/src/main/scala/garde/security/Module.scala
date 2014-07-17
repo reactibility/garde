@@ -5,7 +5,6 @@
 package garde.security
 
 import akka.actor._
-import akka.actor.OneForOneStrategy
 import akka.persistence.{RecoveryCompleted, Recover, PersistentActor, SnapshotOffer}
 import akka.util.Timeout
 import scalaz._
@@ -110,11 +109,6 @@ class ModuleSupervisor(implicit val timeout: Timeout) extends Actor {
   import ActiveModule._
   import ModuleSupervisor._
   import CommonValidations._
-
-  override val supervisorStrategy =
-    OneForOneStrategy() {
-      case _: Exception => Restart
-    }
 
   def receive = {
     case cmd @ CreateModule(id, name)  =>
@@ -234,7 +228,7 @@ class ModuleLocator(moduleId: String)(implicit val timeout: Timeout) extends Act
     case msg @ ModuleRecoveryComplete(completed) =>
       if (completed) {
         val module = sender
-        client ! module
+        client ! module.path
         context stop self
       }
       else
